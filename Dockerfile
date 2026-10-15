@@ -27,13 +27,15 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && npm install -g pnpm typescript tsx \
     && npm cache clean --force
 
-# torch 三件套用 CPU 版
-RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio torchvision
+# torch 三件套用 CPU 版；torchaudio 2.9 起读写音频要靠 torchcodec，一起装
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio torchvision torchcodec
 
 # 数据与通用、音视频与视觉、浏览器自动化。不钉版本：镜像本身就是钉，
 # 每次构建的实际版本写进镜像里的 /opt/runner/versions.txt。
 # rembg 要 opencv-python-headless、ultralytics 要 opencv-python，两个都提供 cv2：装完只留 headless。
-RUN pip install \
+# av 钉在 19 以下：PyAV 19 去掉了 open() 的 metadata_errors 参数，faster-whisper 1.2.1 还在传它
+# （上游 master 已修、未发版）；等 faster-whisper 发了新版再放开。
+RUN pip install "av<19" \
         numpy pandas scipy matplotlib pillow requests httpx openpyxl scikit-learn statsmodels \
         duckdb pyarrow sqlalchemy psycopg2-binary pymysql pyyaml beautifulsoup4 lxml pymupdf pypdf \
         fonttools tiktoken langdetect websocket-client fastapi uvicorn pytest uv tqdm \
@@ -51,4 +53,4 @@ RUN mkdir -p /opt/runner \
     && useradd -m -u 1000 runner
 
 USER 1000
-WORKDIR /work/run
+WORKDIR /home/runner

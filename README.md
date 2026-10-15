@@ -29,5 +29,6 @@ ghcr.io/flowgpt/christina-exec-image:<构建日期>-<提交号>
 `.github/workflows/build.yml`：
 
 - 只有合进 main 的提交会构建、发布。
+- 构建完先做冒烟测试：常用库逐个 import，再实际跑几样（音频解码、Chromium 启动），有一项失败就不推。
 - 构建前后各做一道 trivy 密钥扫描：先扫本仓库的文件，再扫构建出的整个镜像。任何一条命中，流水线就失败，镜像不会推出去。
 - 标签是「构建日期-提交号」，没有 `latest`，用的人自己钉版本。
