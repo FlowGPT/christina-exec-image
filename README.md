@@ -75,6 +75,7 @@ caddy、cloudflared 的版本和校验和也在 `job/Dockerfile` 里，升级时
 - 不含任何代码、数据、配置或凭据。
 - 不含任何内部域名或地址。
 - 通用镜像的 Dockerfile 除了从官方 node 镜像取 node 以外，不 COPY、不 ADD 任何东西；工单镜像的 `job/Dockerfile` 不 COPY、不 ADD 任何东西，构建上下文里只有它自己。
+- 仓库里只有这几样：两个 Dockerfile、构建流水线、本 README，以及 `smoke/` 下的两个冒烟脚本。冒烟脚本只在构建时跑，用来确认镜像真能用，不会进镜像；它们和其余文件一样过仓库那道密钥扫描。
 
 ## 怎么构建和发布
 
