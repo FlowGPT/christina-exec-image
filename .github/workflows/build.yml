@@ -75,6 +75,14 @@ jobs:
           sys.exit(1 if bad else 0)
           PY
 
+      # 以镜像默认用户（uid 1000，和集群里一样）跑 claude --version，必须等于 Dockerfile 里钉的版本。
+      - name: Smoke test (claude --version equals ARG CLAUDE_CODE_VERSION)
+        run: |
+          want=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' Dockerfile)
+          got=$(docker run --rm -w /tmp "$IMAGE:${{ steps.tag.outputs.tag }}" claude --version)
+          echo "Dockerfile: $want / image: $got"
+          [ -n "$want" ] && [ "${got%% *}" = "$want" ]
+
       - name: Secret scan (image)
         run: |
           docker run --rm -v /var/run/docker.sock:/var/run/docker.sock "$TRIVY" \

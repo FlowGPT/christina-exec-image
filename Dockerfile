@@ -27,6 +27,17 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && npm install -g pnpm typescript tsx \
     && npm cache clean --force
 
+# Claude Code CLI，版本钉死，和 Christina 生产用的 SDK（claude-agent-sdk）随包带的 CLI 同一版。
+# 整单上集群要在容器里跑 Claude Code，模型接口对客户端版本有下限（10-21 实测：旧版直接回 400），
+# 和生产同一版最稳。Christina 仓有测试对账：那边 SDK 升了而这里没跟上，那边 CI 就红。
+# 升级：改这一行，合入后把 CI 推出的新标签填回 Christina 仓 tools/cluster_run.py 的 DEFAULT_IMAGE。
+# 关掉自动更新：钉的版本不能在运行时被 CLI 自己换掉。
+ARG CLAUDE_CODE_VERSION=2.1.299
+ENV DISABLE_AUTOUPDATER=1
+RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+    && npm cache clean --force \
+    && test "$(claude --version | cut -d' ' -f1)" = "${CLAUDE_CODE_VERSION}"
+
 # torch 三件套用 CPU 版；torchaudio 2.9 起读写音频要靠 torchcodec，一起装
 RUN pip install --index-url https://download.pytorch.org/whl/cpu torch torchaudio torchvision torchcodec
 
@@ -49,7 +60,7 @@ RUN playwright install --with-deps chromium \
     && rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /opt/runner \
-    && { python3 --version; node --version; ffmpeg -version | head -1; pip freeze; } > /opt/runner/versions.txt \
+    && { python3 --version; node --version; claude --version; ffmpeg -version | head -1; pip freeze; } > /opt/runner/versions.txt \
     && useradd -m -u 1000 runner
 
 USER 1000
