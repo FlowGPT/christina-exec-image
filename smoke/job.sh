@@ -1,9 +1,9 @@
-# 工单镜像的冒烟测试：以镜像默认用户（uid 1000）按 README 里的起法起 postgres 和 redis，再试预览工具。
+# 工单镜像的冒烟测试：以镜像默认用户（uid 1001 christina，和工单 pod 里一样）按 README 里的起法起 postgres 和 redis，再试预览工具。
 # 用法：docker run --rm -i <工单镜像> bash -s < smoke/job.sh
 # 任何一步失败都以非 0 退出。
 set -euo pipefail
 
-test "$(id -u)" = 1000 || { echo "运行用户应为 uid 1000，实际是 $(id -u)"; exit 1; }
+test "$(id -u)" = 1001 || { echo "运行用户应为 uid 1001，实际是 $(id -u)"; exit 1; }
 if command -v sudo >/dev/null; then echo "镜像里不应有 sudo"; exit 1; fi
 
 W=$(mktemp -d)

@@ -114,12 +114,24 @@ jobs:
           docker image prune -af >/dev/null || true
           df -h /
 
-      # 构建上下文只有 job/ 目录（里面只有 Dockerfile）；基础镜像是 job/Dockerfile 里钉死的那版通用镜像。
+      # 构建上下文只有 job/ 目录（Dockerfile、依赖清单副本、boot 脚本、一句话的壳）；基础镜像是 job/Dockerfile 里钉死的那版通用镜像。
       - name: Build
         run: docker build --pull -t "$IMAGE:$TAG" job/
 
-      - name: Smoke test (postgres+pgvector, redis, caddy, cloudflared as uid 1000)
+      - name: Smoke test (postgres+pgvector, redis, caddy, cloudflared as uid 1001)
         run: docker run --rm -i "$IMAGE:$TAG" bash -s < smoke/job.sh
+
+      # pod 运行环境，以镜像默认用户（uid 1001，和 pod 规格里一样）跑：PATH 上的 claude 和 venv 里 SDK 随包的 claude
+      # 都要等于通用镜像 Dockerfile 钉的版本；agent-browser 带 --no-sandbox 开一页、点一下；venv 的 playwright 起得来；
+      # kubectl / aws / docker 三个壳只说一句话；启动链要写的目录对 uid 1001 可写。
+      - name: Smoke test (pod runtime as uid 1001)
+        run: |
+          want=$(sed -n 's/^ARG CLAUDE_CODE_VERSION=//p' Dockerfile)
+          docker run --rm -i --shm-size=1g -e WANT_CLAUDE="$want" "$IMAGE:$TAG" bash -s < smoke/pod.sh
+
+      # christina-pod-boot 对一个假的单面 API：sha256 不对、依赖不符、401、正常、命中缓存、钉的版本不留了、跳转。
+      - name: Smoke test (christina-pod-boot against a fake plane)
+        run: docker run --rm -i "$IMAGE:$TAG" python3 - < smoke/pod_boot.py
 
       - name: Smoke test (generic image checks still pass)
         run: docker run --rm -i -w /tmp "$IMAGE:$TAG" python3 - < smoke/exec.py
