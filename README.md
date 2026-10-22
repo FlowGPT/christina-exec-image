@@ -10,6 +10,7 @@ ghcr.io/flowgpt/christina-exec-image:<构建日期>-<提交号>
 
 - Python 3.12：数据处理、科学计算、音视频（whisper、faster-whisper、demucs 等）、视觉、机器学习库，全部是 CPU 版。
 - Node 22，以及 pnpm、typescript、tsx。
+- Claude Code CLI，版本钉死在 Dockerfile 的 `ARG CLAUDE_CODE_VERSION`，和 Christina 生产用的 SDK 随包带的 CLI 同一版；自动更新已关。
 - ffmpeg、imagemagick、poppler-utils、git、curl、jq。
 - Playwright 和 Chromium（用于批量截图和渲染，不做交互）。
 - 中日韩字体和 emoji 字体。
@@ -29,6 +30,6 @@ ghcr.io/flowgpt/christina-exec-image:<构建日期>-<提交号>
 `.github/workflows/build.yml`：
 
 - 只有合进 main 的提交会构建、发布。
-- 构建完先做冒烟测试：常用库逐个 import，再实际跑几样（音频解码、Chromium 启动），有一项失败就不推。
+- 构建完先做冒烟测试：常用库逐个 import，再实际跑几样（音频解码、Chromium 启动），并核对 `claude --version` 等于 Dockerfile 里钉的版本，有一项失败就不推。
 - 构建前后各做一道 trivy 密钥扫描：先扫本仓库的文件，再扫构建出的整个镜像。任何一条命中，流水线就失败，镜像不会推出去。
 - 标签是「构建日期-提交号」，没有 `latest`，用的人自己钉版本。
