@@ -13,6 +13,7 @@ ghcr.io/flowgpt/christina-exec-job:<构建日期>-<提交号>     # 工单镜像
 
 - Python 3.12：数据处理、科学计算、音视频（whisper、faster-whisper、demucs 等）、视觉、机器学习库，全部是 CPU 版。
 - Node 22，以及 pnpm、typescript、tsx。
+- Claude Code CLI，版本钉死在 Dockerfile 的 `ARG CLAUDE_CODE_VERSION`，和 Christina 生产用的 SDK 随包带的 CLI 同一版；自动更新已关。
 - ffmpeg、imagemagick、poppler-utils、git、curl、jq。
 - Playwright 和 Chromium（用于批量截图和渲染，不做交互）。
 - 中日韩字体和 emoji 字体。
@@ -84,7 +85,7 @@ caddy、cloudflared 的版本和校验和也在 `job/Dockerfile` 里，升级时
 - 合进 main 的提交：两个镜像都构建、冒烟、扫描，全过才发布。
 - 手动跑（Actions 里的 workflow_dispatch，可以选分支）：`publish` 默认 `false`，只构建、冒烟、扫描，不推；选 `true` 才推。命令行：`gh workflow run build.yml --ref <分支> -f publish=false`。
 - 冒烟测试，有一项失败就不推：
-  - 通用镜像跑 `smoke/exec.py`：常用库逐个 import，再实际跑几样（音频解码、Chromium 启动）。
+  - 通用镜像跑 `smoke/exec.py`：常用库逐个 import，再实际跑几样（音频解码、Chromium 启动）；再以默认用户跑 `claude --version`，必须等于 Dockerfile 里钉的版本。
   - 工单镜像先跑 `smoke/job.sh`：以 uid 1000 按上面的起法起 postgres，建 vector 扩展、建 HNSW 索引跑一句向量查询，再用带密码的连接串连一次；起 redis 并 PING；`caddy version`、`cloudflared --version`，并让 caddy 以普通用户在高端口起服务。然后再跑一遍 `smoke/exec.py`，确认加装的东西没弄坏原有的。
 - 两道 trivy 密钥扫描：先扫本仓库的文件，再扫构建出的每个镜像。任何一条命中，流水线就失败，镜像不会推出去。
 - 标签是「构建日期-提交号」，同一次构建两个镜像标签相同；没有 `latest`，用的人自己钉版本。
