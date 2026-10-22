@@ -3,12 +3,13 @@
 用法（镜像里，uid 1001）：docker run --rm -i <工单镜像> python3 - < smoke/pod_boot.py
 本机调试：python3 smoke/pod_boot.py --boot job/christina-pod-boot --root <空目录>（在那个根下造一个假 venv）
 
-假的代码包里只有三样：依赖清单（镜像里那份的逐字副本）、一个打标记的 tools/plane_pod/pod_setup.py、一个打印
-「ENTRY OK <版本>」后退出 0 的 src/plane_pod/entry.py。核的情形：
+假的代码包里只有四样：依赖清单（镜像里那份的逐字副本）、一个打标记的 tools/plane_pod/pod_setup.py、一个打印
+「ENTRY OK <版本>」后退出 0 的 src/plane_pod/entry.py、一个打印参数的 src/plane_pod/files.py（给 ws 用）。核的情形：
   - 代码包的 sha256 和头对不上 → 11，缓存里不留；
   - 依赖清单和镜像里的不一样 → 11，没有解包；
   - 令牌被拒（401）→ 10；
-  - 正常：取码、缓存、解包、.venv 链到镜像 venv、跑安装步骤、exec 进 entry → 0；
+  - 正常：取码、缓存、解包、.venv 链到镜像 venv、跑安装步骤、exec 进 entry → 0；解包以后 ws 转给代码里的
+    src.plane_pod.files（在一个自带 src/ 的目录里跑也不会被那里的 src 盖掉，相对路径按调用目录算）；
   - 命中缓存：钉了上一步那版，假服务全部回 500 → 照样 0，假服务一个请求都没收到；
   - 钉的版本生产不留了（404）→ 改取当前版本，0；
   - 跳转（302 到别的地址）→ 不跟、12，令牌没被带到跳转目标。
@@ -58,6 +59,7 @@ def release(tag: str) -> tuple[str, bytes]:
         "src/plane_pod/__init__.py": b"",
         "src/plane_pod/entry.py": b"import os\nprint('ENTRY OK', os.environ['CHRISTINA_RELEASE_SHA'], os.getcwd())\n",
         "tools/plane_pod/pod_setup.py": b"import os, pathlib\npathlib.Path(os.environ['SMOKE_SETUP_MARK']).write_text('ok')\n",
+        "src/plane_pod/files.py": b"import os, sys\nprint('FILES OK', sys.argv[1:], os.getcwd())\n",
     }
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w:gz") as tar:
@@ -197,6 +199,16 @@ expect("正常：跑了安装步骤", SETUP_MARK.exists())
 expect("正常：.venv 链到镜像的 venv", os.readlink(CODE / ".venv") == str(VENV))
 expect("正常：缓存里有包和记录", (CACHE / f"{v2}.tar.gz").exists()
        and json.loads((CACHE / f"{v2}.json").read_text())["sha"] == v2)
+if not args.root:  # ws 写死了真路径，只在镜像里核
+    shadow = W / "her-repo"
+    (shadow / "src" / "plane_pod").mkdir(parents=True)
+    (shadow / "src" / "__init__.py").write_text("")
+    (shadow / "src" / "plane_pod" / "__init__.py").write_text("")
+    (shadow / "src" / "plane_pod" / "files.py").write_text("print('SHADOWED')\n")
+    p = subprocess.run(["ws", "get", "notes/a.md", "out.md"], cwd=shadow, capture_output=True, text=True, timeout=60)
+    expect("解包以后 ws 转给代码里的 files，不被当前目录的 src 盖掉，cwd 不变",
+           p.returncode == 0 and "FILES OK ['get', 'notes/a.md', 'out.md']" in p.stdout
+           and str(shadow) in p.stdout and "SHADOWED" not in p.stdout, p)
 
 # 5. 命中缓存：钉了 v2，假服务全部 500
 reset_code()

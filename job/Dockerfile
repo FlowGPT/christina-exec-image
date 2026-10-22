@@ -2,10 +2,11 @@
 #
 # 和通用镜像一样只装公开的东西：不含 Christina 的代码、数据、配置或凭据，也不写任何内部地址。代码在 pod 起来以后由
 # christina-pod-boot 带线令牌从单面 API 取（地址由 pod 规格的 PLANE_URL 给）。
-# 构建上下文是 job/ 这个目录。COPY 进来的只有三样，都在这个目录里、都过仓库的密钥扫描：
+# 构建上下文是 job/ 这个目录。COPY 进来的只有四样，都在这个目录里、都过仓库的密钥扫描：
 #   - requirements-staging.lock：Christina 仓同名文件的逐字副本，只有 PyPI 上第三方包的精确版本（装 venv 用）；
 #   - christina-pod-boot：pod 的启动脚本；
-#   - bin/no-credentials：kubectl / aws / docker 的一句话壳。
+#   - bin/no-credentials：kubectl / aws / docker 的一句话壳；
+#   - bin/ws：工作区文件按需取 / 回传的壳（转给解包后的代码，代码不在就说还没就绪）。
 
 # 基础镜像按「标签@digest」钉死：同一份层，集群节点上已有通用镜像时只需拉增量。
 # 升级通用镜像时，标签和 digest 一起改。20261022-83d44fb 起通用镜像里有 Claude Code CLI 2.1.299（#2）。
@@ -181,7 +182,7 @@ RUN set -eux; \
         timeout 60 agent-browser "$@" close >/dev/null || true'; \
     rm -rf "$gate"
 
-# 启动脚本、三个一句话的壳，以及 pod 里要写的几处目录（都交给 uid 1001；/opt/christina 本身仍归 root）：
+# 启动脚本、三个一句话的壳、ws，以及 pod 里要写的几处目录（都交给 uid 1001；/opt/christina 本身仍归 root）：
 #   /opt/christina/remote-claude-code  代码解包处（容器可写层，每次容器新起都是空的）；/opt/christina/current 指向它
 #   /opt/christina/.claude             生产的 hooks 目录（/opt/christina/.claude/hooks）
 #   /etc/christina                     这版代码的边界设置和听众注册表由 pod_setup 放进来（生产上归 root；pod 里代码本身
@@ -189,8 +190,9 @@ RUN set -eux; \
 #   /opt/christina/workspace、/var/lib/christina/line、/run/christina  内存盘和线卷的挂载点
 COPY christina-pod-boot /usr/local/bin/christina-pod-boot
 COPY bin/no-credentials /usr/local/bin/no-credentials
+COPY bin/ws /usr/local/bin/ws
 RUN set -eux; \
-    chmod 0755 /usr/local/bin/christina-pod-boot /usr/local/bin/no-credentials; \
+    chmod 0755 /usr/local/bin/christina-pod-boot /usr/local/bin/no-credentials /usr/local/bin/ws; \
     for name in kubectl aws docker; do ln -s no-credentials "/usr/local/bin/$name"; done; \
     install -d -o 1001 -g 1001 -m 0755 /opt/christina/remote-claude-code /opt/christina/.claude \
         /opt/christina/workspace /etc/christina /var/lib/christina/line /run/christina; \

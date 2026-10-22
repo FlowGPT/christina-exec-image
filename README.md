@@ -60,6 +60,9 @@ ghcr.io/flowgpt/christina-exec-job:<构建日期>-<提交号>     # 工单镜像
   headless shell。pod 里给不了 chromium 自带沙箱要的用户命名空间，一律 `--no-sandbox`，隔离由 pod 提供。
 - **三个壳**：`kubectl`、`aws`、`docker` 都是 `no-credentials` 的链接，说一句「这台机器上没有这类凭据，要用就把单交回前台」
   （docker 那句另外指向上面的数据库起法），退出 1。
+- **ws**：`/usr/local/bin/ws`，按需取、回传源群工作区的文件。它只是把参数转给解包后的代码
+  （`python -m src.plane_pod.files ls|get|push`）；代码还没解包时说「代码还没就绪」，退出 1。用 `python -P` 加 `PYTHONPATH`
+  指代码根，所以在一个自带 `src/` 的仓库里跑也不会被那里的 `src` 盖掉；不 cd，相对路径按调用时所在的目录算。
 - **tini**：pod 规格以它当 PID 1（收僵尸、转信号），退出码原样带出。
 - 给 uid 1001 的目录：`/opt/christina/remote-claude-code`、`/opt/christina/.claude`、`/etc/christina`，以及内存盘和线卷的
   挂载点 `/opt/christina/workspace`、`/var/lib/christina/line`、`/run/christina`。`/opt/christina` 本身归 root。
@@ -108,9 +111,9 @@ caddy、cloudflared、chromium、agent-browser 的版本和校验和也在 `job/
 - 不含 Christina 的任何代码、数据、配置或凭据（代码在 pod 起来以后带令牌现取）。
 - 不含任何内部域名或地址（单面 API 的地址由 pod 规格的 `PLANE_URL` 给）。
 - 通用镜像的 Dockerfile 除了从官方 node 镜像取 node 以外，不 COPY、不 ADD 任何东西。工单镜像的 `job/Dockerfile` 只 COPY
-  构建上下文 `job/` 里的三样：依赖清单副本 `requirements-staging.lock`、启动脚本 `christina-pod-boot`、一句话的壳
-  `bin/no-credentials`。
-- 仓库里只有这几样：两个 Dockerfile、上面那三个文件、构建流水线、本 README，以及 `smoke/` 下的冒烟脚本（`exec.py`、
+  构建上下文 `job/` 里的四样：依赖清单副本 `requirements-staging.lock`、启动脚本 `christina-pod-boot`、一句话的壳
+  `bin/no-credentials`、ws 壳 `bin/ws`。
+- 仓库里只有这几样：两个 Dockerfile、上面那四个文件、构建流水线、本 README，以及 `smoke/` 下的冒烟脚本（`exec.py`、
   `job.sh`、`pod.sh`、`pod_boot.py`）。冒烟脚本只在构建时跑，用来确认镜像真能用，不会进镜像；所有文件都过仓库那道密钥扫描。
 
 ## 怎么构建和发布
@@ -122,8 +125,8 @@ caddy、cloudflared、chromium、agent-browser 的版本和校验和也在 `job/
 - 冒烟测试，有一项失败就不推：
   - 通用镜像跑 `smoke/exec.py`：常用库逐个 import，再实际跑几样（音频解码、Chromium 启动）；再以默认用户跑 `claude --version`，必须等于 Dockerfile 里钉的版本。
   - 工单镜像先跑 `smoke/job.sh`：以 uid 1001 按上面的起法起 postgres，建 vector 扩展、建 HNSW 索引跑一句向量查询，再用带密码的连接串连一次；起 redis 并 PING；`caddy version`、`cloudflared --version`，并让 caddy 以普通用户在高端口起服务。
-  - 再跑 `smoke/pod.sh`（以 uid 1001）：PATH 上的 `claude` 和 venv 里 SDK 随包的 `claude` 都等于通用镜像钉的版本；agent-browser 带 `--no-sandbox` 开一页、点一下；venv 的 playwright 起得来 chromium；三个壳只说一句话、退出 1；启动链要写的目录对 uid 1001 可写。
-  - 再跑 `smoke/pod_boot.py`：起一个假的单面 API，看 `christina-pod-boot` 在这几种情形下的退出码和动作：代码包 sha256 不对（11，不留缓存）、依赖不符（11，不解包）、401（10）、正常（取码、缓存、解包、跑安装步骤、exec 进 entry）、命中缓存（假服务全回 500 照样起来，一个请求都不发）、钉的版本生产不留了（改取当前）、跳转（不跟，12）。
+  - 再跑 `smoke/pod.sh`（以 uid 1001）：PATH 上的 `claude` 和 venv 里 SDK 随包的 `claude` 都等于通用镜像钉的版本；agent-browser 带 `--no-sandbox` 开一页、点一下；venv 的 playwright 起得来 chromium；三个壳只说一句话、退出 1；代码还没解包时 ws 说「代码还没就绪」、退出非 0；启动链要写的目录对 uid 1001 可写。
+  - 再跑 `smoke/pod_boot.py`：起一个假的单面 API，看 `christina-pod-boot` 在这几种情形下的退出码和动作：代码包 sha256 不对（11，不留缓存）、依赖不符（11，不解包）、401（10）、正常（取码、缓存、解包、跑安装步骤、exec 进 entry；解包以后 ws 转给代码，在自带 src/ 的目录里也不被盖掉）、命中缓存（假服务全回 500 照样起来，一个请求都不发）、钉的版本生产不留了（改取当前）、跳转（不跟，12）。
   - 最后再跑一遍 `smoke/exec.py`，确认加装的东西没弄坏原有的。
 - 两道 trivy 密钥扫描：先扫本仓库的文件，再扫构建出的每个镜像。任何一条命中，流水线就失败，镜像不会推出去。
 - 标签是「构建日期-提交号」，同一次构建两个镜像标签相同；没有 `latest`，用的人自己钉版本。

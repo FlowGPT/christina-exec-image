@@ -51,6 +51,10 @@ for name in kubectl aws docker; do
   test "$(wc -l < "$W/err")" -le 1 || { echo "$name 的提示不止一句"; exit 1; }
 done
 
+# ws：代码还没解包时说「还没就绪」，退出非 0（解包以后转给代码的那一路在 smoke/pod_boot.py 里核）。
+if ws ls > /dev/null 2> "$W/err"; then echo "代码不在时 ws 不该成功"; exit 1; fi
+grep -q "代码还没就绪" "$W/err" || { echo "ws 的提示不对："; cat "$W/err"; exit 1; }
+
 # 启动链要用的：tini、boot 脚本、给 uid 1001 的几处目录。
 tini --version
 test -x /usr/local/bin/christina-pod-boot
