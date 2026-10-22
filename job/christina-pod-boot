@@ -1,0 +1,304 @@
+#!/usr/local/bin/python3 -I
+"""christina-pod-boot：工单 pod 的启动脚本。
+
+镜像里只有第三方依赖，代码在 pod 起来以后才取。这个脚本是 tini 之后的第一个进程，做完下面几步就 exec 成工单宿主：
+
+1. 等令牌文件出现（派单器经 ``kubectl exec`` 的 stdin 写进内存盘），最多 120 秒；
+2. 带令牌从单面 API 的 ``GET /plane/v0/release`` 取这版代码（tar.gz），按响应头 ``X-Release-Sha256`` 校验，
+   缓存在线卷的 ``releases/`` 下（``<sha>.tar.gz`` 加一份 ``<sha>.json``）。pod 规格钉了版本
+   （``CHRISTINA_RELEASE_SHA``）而缓存里正好有、校验得过，就不再下载；钉的版本生产已经不留了（404），改取当前版本；
+3. 核依赖：这版代码要的依赖清单（``X-Requirements-Sha256``）必须和镜像里装 venv 的那份逐字相同；
+4. 清空并解包到 ``/opt/christina/remote-claude-code``（只收普通文件、目录和包内链接），再核一遍解出来的依赖清单，
+   ``.venv`` 链到镜像里的 venv；
+5. 跑这版代码自己的安装步骤 ``tools/plane_pod/pod_setup.py``（git、skills、/etc 下的配置……私有的东西都在那边）；
+6. ``exec .venv/bin/python -m src.plane_pod.entry``，``CHRISTINA_RELEASE_SHA`` 改成实际跑的那版。
+
+退出码：10 令牌被拒（401）；11 代码或依赖校验不过；12 其余启动失败（等不到令牌、取不到代码、解包或安装失败）。
+exec 之后的退出码归工单宿主（0 正常排干、20 崩溃）。
+
+环境变量（pod 规格里写好）：``PLANE_URL``（https，或本机回环上的 http）、``PLANE_TOKEN_FILE``、
+``CHRISTINA_RELEASE_SHA``（可选）。令牌只在文件里：不进环境变量、命令行和日志，本脚本只在内存里拿着它发请求。
+``CHRISTINA_POD_BOOT_ROOT`` 只给测试用：把下面所有绝对路径挂到另一个根下。只用标准库。
+"""
+from __future__ import annotations
+
+import hashlib
+import ipaddress
+import json
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import tarfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+from urllib.parse import urlencode, urlsplit
+
+EXIT_TOKEN_REJECTED = 10
+EXIT_VERIFY_FAILED = 11
+EXIT_BOOT_FAILED = 12
+
+ROOT = Path(os.environ.get("CHRISTINA_POD_BOOT_ROOT") or "/")
+CODE = ROOT / "opt/christina/remote-claude-code"
+VENV = ROOT / "opt/christina/venv"
+IMAGE_REQUIREMENTS = VENV / "requirements-staging.lock"
+CACHE = ROOT / "var/lib/christina/line/releases"
+DEFAULT_TOKEN_FILE = "/run/christina/plane/token"
+REQUIREMENTS = "requirements-staging.lock"
+SETUP = "tools/plane_pod/pod_setup.py"
+ENTRY_MODULE = "src.plane_pod.entry"
+
+TOKEN_WAIT_S = 120
+FETCH_ATTEMPTS = 6
+FETCH_TIMEOUT_S = 120
+SETUP_TIMEOUT_S = 300
+CACHE_KEEP = 3
+_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_HEX64_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+class BootError(Exception):
+    def __init__(self, code: int, message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def log(message: str) -> None:
+    print(f"[pod-boot] {message}", file=sys.stderr, flush=True)
+
+
+def sha256_file(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def plane_url() -> str:
+    url = (os.environ.get("PLANE_URL") or "").strip().rstrip("/")
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.scheme == "https" and host:
+        return url
+    if parts.scheme == "http":
+        try:
+            if host == "localhost" or ipaddress.ip_address(host).is_loopback:
+                return url
+        except ValueError:
+            pass
+    raise BootError(EXIT_BOOT_FAILED, f"PLANE_URL 要是 https（或本机回环上的 http）：{url!r}")
+
+
+def wait_token(path: Path, wait_s: float = TOKEN_WAIT_S) -> str:
+    deadline = time.monotonic() + wait_s
+    while True:
+        try:
+            token = path.read_text(encoding="utf-8").strip()
+            if token:
+                return token
+        except OSError:
+            pass
+        if time.monotonic() >= deadline:
+            raise BootError(EXIT_BOOT_FAILED, f"等了 {wait_s:.0f} 秒，令牌文件 {path} 还没出现（派单器没送到）")
+        time.sleep(0.5)
+
+
+# ── 取码与缓存 ───────────────────────────────────────────────────────────────
+
+def cached(sha: str) -> dict | None:
+    """钉的这版在缓存里、而且包的 sha256 和当时核过的一致 → 它的记录；否则 None。"""
+    meta_path, tar_path = CACHE / f"{sha}.json", CACHE / f"{sha}.tar.gz"
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if meta.get("sha") != sha or not _HEX64_RE.match(str(meta.get("sha256", ""))) \
+            or not _HEX64_RE.match(str(meta.get("requirements_sha256", ""))):
+        return None
+    try:
+        if sha256_file(tar_path) != meta["sha256"]:
+            log(f"缓存里的 {sha[:12]} 和当时核过的哈希对不上，重新取")
+            return None
+    except OSError:
+        return None
+    return meta
+
+
+def _write_json_atomic(path: Path, obj: dict) -> None:
+    tmp = path.with_name(f".{path.name}.{os.getpid()}")
+    tmp.write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def _prune(keep_sha: str) -> None:
+    tars = sorted(CACHE.glob("*.tar.gz"), key=lambda p: p.stat().st_mtime, reverse=True)
+    for old in tars[CACHE_KEEP:]:
+        sha = old.name[: -len(".tar.gz")]
+        if sha == keep_sha:
+            continue
+        for p in (old, CACHE / f"{sha}.json"):
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不跟跳转：urllib 跟跳转时会把 Authorization 原样带到新地址（哪怕换了主机）。单面 API 从不跳转，
+    回了 3xx 就按「被拒」处理。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
+_OPENER = urllib.request.build_opener(_NoRedirect)
+
+
+def _request(base: str, token: str, sha: str | None):
+    query = f"?{urlencode({'sha': sha})}" if sha else ""
+    req = urllib.request.Request(f"{base}/plane/v0/release{query}",
+                                 headers={"Authorization": f"Bearer {token}", "Accept": "application/gzip"})
+    return _OPENER.open(req, timeout=FETCH_TIMEOUT_S)
+
+
+def fetch(base: str, token: str, pinned: str | None) -> dict:
+    """取一版代码到缓存，返回它的记录 ``{sha, sha256, requirements_sha256}``。"""
+    CACHE.mkdir(parents=True, exist_ok=True)
+    want = pinned
+    last = ""
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        tmp = CACHE / f".download-{os.getpid()}"
+        try:
+            with _request(base, token, want) as resp:
+                sha = resp.headers.get("X-Release-Sha", "")
+                body_sha = resp.headers.get("X-Release-Sha256", "")
+                req_sha = resp.headers.get("X-Requirements-Sha256", "")
+                h = hashlib.sha256()
+                with open(tmp, "wb") as fh:
+                    for chunk in iter(lambda: resp.read(1 << 20), b""):
+                        h.update(chunk)
+                        fh.write(chunk)
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401:
+                raise BootError(EXIT_TOKEN_REJECTED, "单面 API 不认这张令牌（401）：过期、撤销，或者线已经收了")
+            if exc.code == 404 and want:
+                log(f"钉的版本 {want[:12]} 生产已经不留了，改取当前版本")
+                want = None
+                continue
+            if exc.code == 429 or exc.code >= 500:
+                last = f"HTTP {exc.code}"
+            else:
+                raise BootError(EXIT_BOOT_FAILED, f"取代码被拒：HTTP {exc.code}")
+        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+            last = f"{type(exc).__name__}: {exc}"
+        else:
+            if not _SHA_RE.match(sha) or not _HEX64_RE.match(body_sha) or not _HEX64_RE.match(req_sha):
+                tmp.unlink(missing_ok=True)
+                raise BootError(EXIT_VERIFY_FAILED, "release 回执缺头或头的形状不对（X-Release-Sha / -Sha256 / "
+                                                    "X-Requirements-Sha256）")
+            if want and sha != want:
+                tmp.unlink(missing_ok=True)
+                raise BootError(EXIT_VERIFY_FAILED, f"要的是 {want[:12]}，回来的是 {sha[:12]}")
+            if h.hexdigest() != body_sha:
+                tmp.unlink(missing_ok=True)
+                raise BootError(EXIT_VERIFY_FAILED, f"代码包的 sha256 对不上（头里是 {body_sha[:12]}，"
+                                                    f"收到的是 {h.hexdigest()[:12]}）：传输坏了或者被改过")
+            os.replace(tmp, CACHE / f"{sha}.tar.gz")
+            meta = {"sha": sha, "sha256": body_sha, "requirements_sha256": req_sha, "fetched_at": int(time.time())}
+            _write_json_atomic(CACHE / f"{sha}.json", meta)
+            _prune(sha)
+            log(f"取到 {sha[:12]}（{(CACHE / f'{sha}.tar.gz').stat().st_size} 字节，sha256 核过）")
+            return meta
+        finally:
+            if tmp.exists():
+                tmp.unlink(missing_ok=True)
+        if attempt < FETCH_ATTEMPTS:
+            delay = min(30.0, 2.0 ** attempt) * (0.5 + random.random())
+            log(f"取代码失败（{last}），{delay:.0f} 秒后重试（{attempt}/{FETCH_ATTEMPTS}）")
+            time.sleep(delay)
+    raise BootError(EXIT_BOOT_FAILED, f"取代码失败 {FETCH_ATTEMPTS} 次，最后一次：{last}")
+
+
+# ── 核依赖、解包、安装 ───────────────────────────────────────────────────────
+
+def check_requirements(meta: dict) -> None:
+    try:
+        image = sha256_file(IMAGE_REQUIREMENTS)
+    except OSError as exc:
+        raise BootError(EXIT_VERIFY_FAILED, f"镜像里没有依赖清单 {IMAGE_REQUIREMENTS}：{exc}") from exc
+    if image != meta["requirements_sha256"]:
+        raise BootError(EXIT_VERIFY_FAILED, f"这版代码（{meta['sha'][:12]}）要的依赖清单和镜像里的不一样（代码要 "
+                                            f"{meta['requirements_sha256'][:12]}，镜像是 {image[:12]}）：镜像该换了")
+
+
+def unpack(meta: dict) -> None:
+    CODE.mkdir(parents=True, exist_ok=True)
+    for child in CODE.iterdir():
+        if child.is_dir() and not child.is_symlink():
+            shutil.rmtree(child)
+        else:
+            child.unlink()
+    try:
+        with tarfile.open(CACHE / f"{meta['sha']}.tar.gz", mode="r:gz") as tar:
+            tar.extractall(CODE, filter="data")
+    except (tarfile.TarError, OSError) as exc:
+        raise BootError(EXIT_BOOT_FAILED, f"解包失败：{type(exc).__name__}: {exc}") from exc
+    try:
+        unpacked = sha256_file(CODE / REQUIREMENTS)
+    except OSError as exc:
+        raise BootError(EXIT_VERIFY_FAILED, f"代码包里没有 {REQUIREMENTS}") from exc
+    if unpacked != meta["requirements_sha256"]:
+        raise BootError(EXIT_VERIFY_FAILED, f"代码包里的 {REQUIREMENTS} 和 release 头说的不一样")
+    venv_link = CODE / ".venv"
+    if venv_link.exists() or venv_link.is_symlink():
+        raise BootError(EXIT_VERIFY_FAILED, "代码包里自带 .venv，不认")
+    venv_link.symlink_to(VENV)
+
+
+def run_setup() -> None:
+    python = CODE / ".venv" / "bin" / "python"
+    try:
+        proc = subprocess.run([str(python), str(CODE / SETUP)], cwd=str(CODE), timeout=SETUP_TIMEOUT_S, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise BootError(EXIT_BOOT_FAILED, f"安装步骤 {SETUP} 没跑成：{type(exc).__name__}: {exc}") from exc
+    if proc.returncode != 0:
+        raise BootError(EXIT_BOOT_FAILED, f"安装步骤 {SETUP} 失败（exit {proc.returncode}）")
+
+
+def main() -> int:
+    try:
+        base = plane_url()
+        pinned = (os.environ.get("CHRISTINA_RELEASE_SHA") or "").strip() or None
+        if pinned and not _SHA_RE.match(pinned):
+            raise BootError(EXIT_BOOT_FAILED, f"CHRISTINA_RELEASE_SHA 不是 40 位小写十六进制：{pinned!r}")
+        token = wait_token(Path(os.environ.get("PLANE_TOKEN_FILE") or DEFAULT_TOKEN_FILE))
+        meta = cached(pinned) if pinned else None
+        if meta is not None:
+            log(f"用缓存里的 {pinned[:12]}（sha256 核过）")
+        else:
+            meta = fetch(base, token, pinned)
+        del token
+        check_requirements(meta)
+        unpack(meta)
+        run_setup()
+        python = CODE / ".venv" / "bin" / "python"
+        env = {**os.environ, "CHRISTINA_RELEASE_SHA": meta["sha"]}
+        os.chdir(CODE)
+        log(f"{meta['sha'][:12]} 就位，exec 工单宿主")
+        os.execve(str(python), [str(python), "-m", ENTRY_MODULE], env)
+    except BootError as exc:
+        log(str(exc))
+        return exc.code
+    except Exception as exc:  # noqa: BLE001 — 其余意外一律按启动失败退出，不带 traceback 里的变量
+        log(f"启动失败：{type(exc).__name__}: {exc}")
+        return EXIT_BOOT_FAILED
+    return EXIT_BOOT_FAILED  # 走不到：execve 成功就不回来
+
+
+if __name__ == "__main__":
+    sys.exit(main())

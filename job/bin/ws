@@ -1,0 +1,11 @@
+#!/bin/sh
+# 工单 pod 里的 ws：按需取、回传源群工作区的文件（实现在 Christina 代码里：python -m src.plane_pod.files ls|get|push）。
+# 代码要等 pod 起来、christina-pod-boot 取码解包以后才在；还没就绪就说一声，退出 1。
+code=/opt/christina/remote-claude-code
+if [ ! -x "$code/.venv/bin/python" ] || [ ! -f "$code/src/plane_pod/files.py" ]; then
+  echo "ws：代码还没就绪（pod 刚起来、还在取码），稍等再试；一直这样就把单交回前台。" >&2
+  exit 1
+fi
+# 不 cd：ws get / push 的相对路径按调用时所在的目录算。-P 让 python 不把当前目录放进 sys.path（她在自己的仓库里
+# 跑 ws 时，那里的 src/ 不能盖过 Christina 的），代码根改由 PYTHONPATH 给。
+PYTHONPATH="$code" exec "$code/.venv/bin/python" -P -m src.plane_pod.files "$@"
