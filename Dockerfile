@@ -32,7 +32,7 @@ RUN ln -s ../lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
 # 和生产同一版最稳。Christina 仓有测试对账：那边 SDK 升了而这里没跟上，那边 CI 就红。
 # 升级：改这一行，合入后把 CI 推出的新标签填回 Christina 仓 tools/cluster_run.py 的 DEFAULT_IMAGE。
 # 关掉自动更新：钉的版本不能在运行时被 CLI 自己换掉。
-ARG CLAUDE_CODE_VERSION=2.1.299
+ARG CLAUDE_CODE_VERSION=2.1.321
 ENV DISABLE_AUTOUPDATER=1
 RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
     && npm cache clean --force \

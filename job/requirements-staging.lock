@@ -13,7 +13,7 @@ browser-cookie3==0.20.1
 certifi==2026.6.17
 cffi==2.1.0
 charset-normalizer==3.4.9
-claude-agent-sdk==0.2.166
+claude-agent-sdk==0.2.180
 click==8.4.2
 cryptography==49.0.0
 frozenlist==1.8.0
