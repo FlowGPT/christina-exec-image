@@ -9,8 +9,8 @@
 #   - bin/ws：工作区文件按需取 / 回传的壳（转给解包后的代码，代码不在就说还没就绪）。
 
 # 基础镜像按「标签@digest」钉死：同一份层，集群节点上已有通用镜像时只需拉增量。
-# 升级通用镜像时，标签和 digest 一起改。20261022-83d44fb 起通用镜像里有 Claude Code CLI 2.1.299（#2）。
-ARG BASE=ghcr.io/flowgpt/christina-exec-image:20261022-83d44fb@sha256:b0c9f32fbe7f8eaefd20a37dd7495ecd6b307050d96ae4c30864cd6cc77c6328
+# 升级通用镜像时，标签和 digest 一起改。20261110-77a3dc5 起通用镜像里是 Claude Code CLI 2.1.321（#4；20261022-83d44fb 是 2.1.299，#2）。
+ARG BASE=ghcr.io/flowgpt/christina-exec-image:20261110-77a3dc5@sha256:995897683d27fd2cc91d4b905a80332d9a8f4c89ecaf2c4f387b54f8133ab351
 FROM ${BASE}
 
 LABEL org.opencontainers.image.source=https://github.com/FlowGPT/christina-exec-image
